@@ -16,10 +16,9 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-
 # --- Page Configuration ---
 st.set_page_config(page_title="InsightAgent", layout="wide")
-st.title("InsightAgent: PDF Agentic Chatbot")
+st.title("🤖 InsightAgent: Agentic PDF Chatbot")
 
 # --- Session State Initialization ---
 if "agent" not in st.session_state:
@@ -173,7 +172,7 @@ else:
             with st.chat_message(role):
                 st.markdown(msg.content)
                 
-    except (KeyError, AttributeError, Exception) as e:
+    except (KeyError, AttributeError, Exception):
         st.info("🆕 This is a new chat thread. Ask a question to start!")
 
     # Chat input
@@ -182,7 +181,6 @@ else:
     if user_query:
         # Update thread name if it's still "New Chat"
         if get_thread_name(st.session_state.thread_id) == "New Chat":
-            # Use first few words of the query as thread name
             thread_name = user_query[:30] + "..." if len(user_query) > 30 else user_query
             st.session_state.chat_threads[st.session_state.thread_id] = thread_name
         
@@ -207,11 +205,19 @@ else:
                     # Get agent response
                     final_state = st.session_state.agent.invoke(input_data, config=config)
                     
-                    # Extract and display response
+                    # Extract response and confidence
                     agent_outcome = final_state.get('agent_outcome')
+                    confidence = final_state.get('confidence', 0.0)
+                    
                     if agent_outcome and isinstance(agent_outcome, AgentFinish):
                         final_answer = agent_outcome.return_values.get('output', 'No response generated.')
+                        
+                        # Display response
                         st.markdown(final_answer)
+                        
+                        # Display confidence
+                        if confidence > 0:
+                            st.markdown(f"**📊 PDF Confidence Level:** {confidence*100:.2f}%")
                         
                         # Update conversation state
                         st.session_state.agent.update_state(
@@ -227,7 +233,7 @@ else:
                     else:
                         st.error("❌ Agent did not provide a proper response.")
                         logging.warning(f"Agent finished with unexpected outcome: {agent_outcome}")
-                        
+                            
                 except Exception as e:
                     st.error(f"❌ Error processing query: {str(e)}")
                     st.exception(e)

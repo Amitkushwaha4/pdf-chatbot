@@ -12,8 +12,8 @@ class AgentState(TypedDict):
     Attributes:
         input: The user's original question
         chat_history: The conversation history
-        agent_outcome: The outcome of the agent's decision
-        intermediate_steps: A sequence of (action, observation) pairs
+        aairsgent_outcome: The outcome of the agent's decision
+        intermediate_steps: A sequence of (action, observation) 
     """
     input: str
     chat_history: Annotated[List[BaseMessage], add_messages]
