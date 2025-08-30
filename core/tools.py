@@ -9,14 +9,16 @@ from tavily import TavilyClient
 import os
 import logging
 import requests
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+CONFIDENCE_THRESHOLD = 0.3
+
 
 def create_rag_tool(vector_store, llm):
-    """Creates the RAG tool for answering specific questions with confidence tracking."""
-
+    """RAG tool that returns (answer_text, confidence)."""
     retriever = vector_store.as_retriever(
         search_type="similarity",
         search_kwargs={"k": 5}
@@ -25,8 +27,7 @@ def create_rag_tool(vector_store, llm):
     qa_system_prompt = (
         "You are an AI assistant specialized in analyzing and answering questions about PDF documents. "
         "Use the following retrieved context to provide accurate, detailed answers. "
-        "If the information is not available in the context, clearly state that you don't know. "
-        "Be precise, informative, and cite specific details when possible.\n\n"
+        "If the information is not available in the context, clearly state that you don't know.\n\n"
         "Context:\n{context}"
     )
 
@@ -35,41 +36,32 @@ def create_rag_tool(vector_store, llm):
         ("human", "{input}"),
     ])
 
-    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+    # Not directly used for the returned text; we compute confidence from similarity.
+    _question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    _rag_chain = create_retrieval_chain(retriever, _question_answer_chain)
 
-    def rag_tool_function(query: str) -> tuple[str, float]:
-        """
-        Return a tuple (answer, confidence) based on retrieved chunks.
-        Confidence = max similarity among top retrieved chunks.
-        """
+    def rag_tool_function(query: str, chat_history=None) -> tuple[str, float]:
+        history_text = ""
+        if chat_history:
+            history_text = "\n".join([f"{'User' if m.type == 'human' else 'Assistant'}: {m.content}" for m in chat_history])
+        full_query = f"{history_text}\nCurrent question: {query}" if history_text else query
+
         try:
             logger.info(f"RAG tool processing query: {query}")
-            response = rag_chain.invoke({"input": query})
+            results = vector_store.similarity_search_with_score(query, k=5)
 
-            # Default answer & confidence
-            answer_text = response.get("answer", response.get("output_text", "No answer generated."))
-            confidence = 0.0
+            if results:
+                docs, scores = zip(*results)
+                # Concatenate top chunks as answer context
+                answer_text = "\n".join([doc.page_content for doc in docs])
+                # scores are distances → lower = closer
+                best_score = min(scores)
+                # confidence in [0,1)
+                confidence = 1.0 / (1.0 + float(best_score))
+            else:
+                answer_text, confidence = "No relevant information found in PDFs.", 0.0
 
-            # Compute max similarity from retrieved source_documents
-            if "source_documents" in response:
-                docs = response["source_documents"]
-                if docs:
-                    similarities = []
-                    for doc in docs:
-                        sim = 0.0
-                        if hasattr(doc, "metadata"):
-                            if "similarity" in doc.metadata:
-                                sim = float(doc.metadata["similarity"])
-                            elif "score" in doc.metadata:
-                                sim = float(doc.metadata["score"])
-                        similarities.append(sim)
-                    if similarities:
-                        confidence = max(similarities)
-            # Ensure confidence is 0–1
-            confidence = min(max(confidence, 0.0), 1.0)
-
-            return answer_text, confidence
+            return answer_text, float(confidence)
 
         except Exception as e:
             logger.error(f"Error in RAG tool: {str(e)}")
@@ -79,23 +71,20 @@ def create_rag_tool(vector_store, llm):
         name="AnswerQuestionAboutPDFs",
         func=rag_tool_function,
         description=(
-            "Use this tool to answer specific questions about PDF content. "
-            "Returns a tuple (answer, confidence) where confidence is based on retrieved chunk similarity."
+            "Answer specific questions using the uploaded PDFs. "
+            "Returns a tuple (answer, confidence[0..1])."
         )
     )
 
 
 def create_summarization_tool(raw_documents, llm):
-    """Creates the summarization tool."""
-
-    # Create document mapping
+    """Summarize a specific PDF by filename (or partial match)."""
     doc_map = {}
     for doc in raw_documents:
         source_name = os.path.basename(doc.metadata.get('source', 'unknown'))
         doc_map.setdefault(source_name, []).append(doc)
 
     def summarize_tool_function(doc_name: str) -> str:
-        """Summarize a specific document."""
         try:
             logger.info(f"Summarization tool processing: {doc_name}")
             if doc_name in doc_map:
@@ -103,8 +92,8 @@ def create_summarization_tool(raw_documents, llm):
             else:
                 # Partial match
                 matching_docs = []
+                clean_requested = doc_name.replace('.pdf', '').lower()
                 for available_doc, doc_list in doc_map.items():
-                    clean_requested = doc_name.replace('.pdf', '').lower()
                     clean_available = available_doc.replace('.pdf', '').lower()
                     if clean_requested in clean_available or clean_available in clean_requested:
                         matching_docs.extend(doc_list)
@@ -130,44 +119,53 @@ def create_summarization_tool(raw_documents, llm):
     return Tool(
         name="SummarizePDF",
         func=summarize_tool_function,
-        description=(
-            "Use this tool to generate a summary of a PDF document. "
-            "Provide the exact filename (including .pdf extension)."
-        )
+        description="Generate a summary of a PDF. Provide the filename (supports partial match)."
     )
 
 
 def create_web_search_tool():
-    """Creates a tool for searching the web using Tavily."""
+    """Search the web via Tavily. Safe against None values."""
     tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
     def web_search_tool_function(query: str) -> str:
         try:
             logger.info(f"Web search tool processing query: {query}")
             result = tavily_client.search(query)
+            if not result:
+                return "No web answer found."
+
             answer_text = ""
             urls = []
+            summary_points = []
 
             if isinstance(result, dict):
-                answer_text = result.get("answer", "").strip()
-                summary_points = []
-                if "results" in result and isinstance(result["results"], list):
-                    for item in result["results"]:
-                        if isinstance(item, dict):
-                            if "url" in item:
-                                urls.append(item["url"])
-                            if "content" in item and item["content"]:
-                                summary_points.append(item["content"].strip())
-                if not answer_text and summary_points:
-                    answer_text = " ".join(summary_points[:3])
-                if answer_text:
-                    answer_text = f"{answer_text}\n\nSources:\n" + "\n".join(urls) if urls else answer_text
-                else:
-                    answer_text = "No useful information found."
-            else:
-                answer_text = str(result)
-            return answer_text if answer_text.strip() else "No web answer found."
+                raw_answer = result.get("answer")
+                answer_text = (raw_answer or "").strip()
 
+                results_list = result.get("results") or []
+                if isinstance(results_list, list):
+                    for item in results_list:
+                        if not isinstance(item, dict):
+                            continue
+                        url = item.get("url")
+                        content = item.get("content")
+                        if url:
+                            urls.append(str(url))
+                        if content:
+                            summary_points.append(str(content).strip())
+
+                if not answer_text and summary_points:
+                    # Take top 2-3 snippets to avoid verbosity
+                    answer_text = " ".join(summary_points[:3])
+
+                if answer_text and urls:
+                    answer_text += "\n\nSources:\n" + "\n".join(urls)
+
+            else:
+                # Fallback stringify
+                answer_text = str(result)
+
+            return answer_text if (answer_text and answer_text.strip()) else "No useful information found."
         except Exception as e:
             logger.error(f"Error in web search tool: {str(e)}")
             return f"Error searching the web: {str(e)}"
@@ -175,68 +173,34 @@ def create_web_search_tool():
     return Tool(
         name="WebSearch",
         func=web_search_tool_function,
-        description=(
-            "Use this tool to search the internet for information not found in the uploaded PDF documents."
+        description="Search the internet for information not found in PDFs."
+    )
+
+
+
+def call_gemini_summary(pdf_answer: str, web_answer: str, query: str) -> str:
+    """Merge PDF + Web info into one concise answer using Gemini 1.5 Flash."""
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client()  # GEMINI_API_KEY from env
+        prompt = (
+            f"User query: {query}\n\n"
+            f"From PDF:\n{pdf_answer}\n\n"
+            f"From Web:\n{web_answer}\n\n"
+            f"Task: Combine into one clear, concise answer. "
+            f"If they disagree, note both briefly."
         )
-    )
-def create_realtime_tool():
-    """Tool for fetching real-time information like weather."""
-
-    import re
-
-    city_pat = re.compile(r"(?:weather\s+(?:in|of)\s+)(?P<city>[a-zA-Z\s\-\.\,]+)$", re.IGNORECASE)
-
-    def extract_city(q: str) -> str | None:
-        m = city_pat.search(q.strip())
-        if m:
-            return m.group("city").strip(" .,")
-
-        # fallback heuristics: last token after 'weather'
-        if "weather" in q.lower():
-            tail = q.lower().split("weather")[-1]
-            tail = tail.replace("in", "").replace("of", "").strip(" .,:;")
-            if tail:
-                return tail.title()
-        return None
-
-    def realtime_tool_function(query: str) -> str:
-        try:
-            logger.info(f"Realtime tool processing query: {query}")
-
-            ql = query.lower()
-            if "weather" in ql:
-                city = extract_city(query)
-                if not city:
-                    return "Please specify a city, e.g., 'weather in Kathmandu'."
-
-                api_key = os.getenv("OPENWEATHER_API_KEY")
-                if not api_key:
-                    return "Realtime weather API key is not configured. Set OPENWEATHER_API_KEY in your environment."
-
-                url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&units=metric&appid={api_key}"
-                try:
-                    resp = requests.get(url, timeout=10)
-                    data = resp.json()
-                except Exception as e:
-                    return f"Network error while contacting weather service: {e}"
-
-                if data.get("cod") == 200 and data.get("main"):
-                    temp = data["main"].get("temp")
-                    desc = data.get("weather", [{}])[0].get("description", "unknown conditions")
-                    return f"The current temperature in {city.title()} is {temp}°C with {desc}."
-                else:
-                    msg = data.get("message") or "Unknown error."
-                    return f"Could not fetch weather for {city.title()}: {msg}"
-
-            # Add more dynamic queries here (stocks, live news, etc.)
-            return "No real-time data found for your query."
-
-        except Exception as e:
-            logger.error(f"Error in Realtime tool: {str(e)}")
-            return f"Error fetching real-time data: {str(e)}"
-
-    return Tool(
-        name="RealtimeData",
-        func=realtime_tool_function,
-        description="Use this tool for real-time information like weather, stock prices, or live news."
-    )
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
+            )
+        )
+        return getattr(response, "text", str(response)).strip()
+    except Exception as e:
+        logger.error(f"Gemini summarization failed: {e}")
+        # Safe fallback: return both parts
+        return f"PDF:\n{pdf_answer}\n\nWeb:\n{web_answer}"

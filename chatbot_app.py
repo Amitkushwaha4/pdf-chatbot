@@ -1,3 +1,4 @@
+# chatbot_app.py
 import streamlit as st
 import uuid
 from langchain_core.messages import HumanMessage, AIMessage
@@ -21,6 +22,8 @@ st.set_page_config(page_title="InsightAgent", layout="wide")
 st.title("🤖 InsightAgent: Agentic PDF Chatbot")
 
 # --- Session State Initialization ---
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
 if "agent" not in st.session_state:
     st.session_state.agent = None
 if "thread_id" not in st.session_state:
@@ -31,6 +34,14 @@ if "raw_documents" not in st.session_state:
     st.session_state.raw_documents = []
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
+
+# --- Thread-based memory ---
+if "chat_history_by_thread" not in st.session_state:
+    st.session_state.chat_history_by_thread = {}
+
+# Ensure current thread has a history list
+thread_id = st.session_state.thread_id
+st.session_state.chat_history_by_thread.setdefault(thread_id, [])
 
 # --- Helper Functions ---
 def get_thread_name(thread_id):
@@ -163,14 +174,15 @@ else:
     current_history = []
     
     try:
-        state = st.session_state.agent.get_state(config)
-        current_history = state.values.get('chat_history', [])
-        
+        # Load chat history for current thread
+        current_history = st.session_state.chat_history_by_thread.get(thread_id, [])
+
         # Display chat history
         for msg in current_history:
             role = "user" if isinstance(msg, HumanMessage) else "assistant"
             with st.chat_message(role):
-                st.markdown(msg.content)
+               st.markdown(msg.content)
+
                 
     except (KeyError, AttributeError, Exception):
         st.info("🆕 This is a new chat thread. Ask a question to start!")
@@ -219,16 +231,17 @@ else:
                         if confidence > 0:
                             st.markdown(f"**📊 PDF Confidence Level:** {confidence*100:.2f}%")
                         
-                        # Update conversation state
-                        st.session_state.agent.update_state(
-                            config, 
-                            {
-                                "chat_history": [
-                                    HumanMessage(content=user_query), 
-                                    AIMessage(content=final_answer)
-                                ]
-                            }
-                        )
+                        # --- Thread-based memory update ---
+                        st.session_state.chat_history_by_thread.setdefault(thread_id, [])
+                        st.session_state.chat_history_by_thread[thread_id].extend([
+                            HumanMessage(content=user_query),
+                            AIMessage(content=final_answer)
+                        ])
+
+                        # Update AgentState with full history
+                        full_history = st.session_state.chat_history_by_thread[thread_id]
+                        st.session_state.agent.update_state(config, {"chat_history": full_history})
+
                         logging.info("Agent invocation successful.")
                     else:
                         st.error("❌ Agent did not provide a proper response.")

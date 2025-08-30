@@ -12,7 +12,7 @@ class AgentState(TypedDict):
     Attributes:
         input: The user's original question
         chat_history: The conversation history
-        aairsgent_outcome: The outcome of the agent's decision
+        agent_outcome: The outcome of the agent's decision
         intermediate_steps: A sequence of (action, observation) 
     """
     input: str
