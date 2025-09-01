@@ -26,8 +26,6 @@ if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 if "agent" not in st.session_state:
     st.session_state.agent = None
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = str(uuid.uuid4())
 if "chat_threads" not in st.session_state:
     st.session_state.chat_threads = {st.session_state.thread_id: "New Chat"}
 if "raw_documents" not in st.session_state:
@@ -53,6 +51,7 @@ def create_new_thread():
     new_thread_id = str(uuid.uuid4())
     st.session_state.chat_threads[new_thread_id] = "New Chat"
     st.session_state.thread_id = new_thread_id
+    st.session_state.chat_history_by_thread.setdefault(new_thread_id, [])
     return new_thread_id
 
 # --- Sidebar ---
@@ -92,7 +91,7 @@ with st.sidebar:
                 st.session_state.raw_documents = process_pdf(temp_files)
                 st.session_state.processed_files = doc_names
                 
-                # Create vector store and agent
+                # Create vector store and agent (persistent for all threads)
                 vector_store = create_vector_store(st.session_state.raw_documents)
                 st.session_state.agent = compile_agent(vector_store, st.session_state.raw_documents)
 
@@ -117,26 +116,27 @@ with st.sidebar:
         st.header("💬 Chat History")
         
         # Display chat threads
-        for thread_id, thread_name in st.session_state.chat_threads.items():
+        for t_id, thread_name in st.session_state.chat_threads.items():
             col1, col2 = st.columns([3, 1])
             
             with col1:
                 if st.button(
                     f"🗨️ {thread_name}", 
-                    key=f"thread_{thread_id}",
+                    key=f"thread_{t_id}",
                     use_container_width=True,
-                    type="primary" if thread_id == st.session_state.thread_id else "secondary"
+                    type="primary" if t_id == st.session_state.thread_id else "secondary"
                 ):
-                    st.session_state.thread_id = thread_id
-                    logging.info(f"Switched to thread: {thread_id}")
+                    st.session_state.thread_id = t_id
+                    st.session_state.chat_history_by_thread.setdefault(t_id, [])
+                    logging.info(f"Switched to thread: {t_id}")
                     st.rerun()
             
             with col2:
-                if st.button("🗑️", key=f"delete_{thread_id}", help="Delete thread"):
+                if st.button("🗑️", key=f"delete_{t_id}", help="Delete thread"):
                     if len(st.session_state.chat_threads) > 1:
-                        logging.warning(f"Deleting thread: {thread_id}")
-                        del st.session_state.chat_threads[thread_id]
-                        if thread_id == st.session_state.thread_id:
+                        logging.warning(f"Deleting thread: {t_id}")
+                        del st.session_state.chat_threads[t_id]
+                        if t_id == st.session_state.thread_id:
                             st.session_state.thread_id = list(st.session_state.chat_threads.keys())[0]
                         st.rerun()
 
@@ -166,35 +166,26 @@ if st.session_state.agent is None:
 
 else:
     # Display current thread info
-    current_thread_name = get_thread_name(st.session_state.thread_id)
+    thread_id = st.session_state.thread_id  # Always use latest
+    current_thread_name = get_thread_name(thread_id)
     st.caption(f"💬 Current chat: {current_thread_name}")
     
     # Load and display chat history
-    config = {'configurable': {'thread_id': st.session_state.thread_id}}
-    current_history = []
-    
-    try:
-        # Load chat history for current thread
-        current_history = st.session_state.chat_history_by_thread.get(thread_id, [])
+    current_history = st.session_state.chat_history_by_thread.get(thread_id, [])
 
-        # Display chat history
-        for msg in current_history:
-            role = "user" if isinstance(msg, HumanMessage) else "assistant"
-            with st.chat_message(role):
-               st.markdown(msg.content)
-
-                
-    except (KeyError, AttributeError, Exception):
-        st.info("🆕 This is a new chat thread. Ask a question to start!")
+    for msg in current_history:
+        role = "user" if isinstance(msg, HumanMessage) else "assistant"
+        with st.chat_message(role):
+            st.markdown(msg.content)
 
     # Chat input
     user_query = st.chat_input("Ask a question or request a summary...")
     
     if user_query:
         # Update thread name if it's still "New Chat"
-        if get_thread_name(st.session_state.thread_id) == "New Chat":
+        if get_thread_name(thread_id) == "New Chat":
             thread_name = user_query[:30] + "..." if len(user_query) > 30 else user_query
-            st.session_state.chat_threads[st.session_state.thread_id] = thread_name
+            st.session_state.chat_threads[thread_id] = thread_name
         
         # Display user message
         with st.chat_message("user"):
@@ -204,9 +195,9 @@ else:
         with st.chat_message("assistant"):
             with st.spinner("thinking..."):
                 try:
-                    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                    config = {"configurable": {"thread_id": thread_id}}
                     
-                    logging.info(f"Invoking agent for thread '{st.session_state.thread_id}' with query: '{user_query}'")
+                    logging.info(f"Invoking agent for thread '{thread_id}' with query: '{user_query}'")
                     
                     # Prepare input data
                     input_data = {
