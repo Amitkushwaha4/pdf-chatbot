@@ -22,8 +22,7 @@ from config.config import load_api_key
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-CONFIDENCE_THRESHOLD = 0.05  # when PDF confidence is below this, merge with WebSearch
+CONFIDENCE_THRESHOLD = 0.05
 
 
 def _decision_prompt():
@@ -38,7 +37,7 @@ Actions (choose exactly one):
 - "AnswerQuestionAboutPDFs"  -> for specific questions likely answerable from the PDFs.
 - "SummarizePDF"             -> when the user asks for a summary of a document.
 - "WebSearch"                -> when the question is unrelated to PDFs or PDFs insufficient.
-
+- "DirectAnswer"            -> when you can answer directly without tools.
 Rules:
 - If unsure whether PDFs contain the answer, prefer AnswerQuestionAboutPDFs first.
 - For SummarizePDF, set "input" to the best-matching filename (string).
@@ -52,7 +51,7 @@ Respond in the format:
     ])
 
 
-def _safe_json_parse(s: str):
+def _safe_json_changesparse(s: str):
     s = s.strip()
     s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE)
 

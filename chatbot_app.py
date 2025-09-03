@@ -222,7 +222,7 @@ else:
                         if confidence > 0:
                             st.markdown(f"**📊 PDF Confidence Level:** {confidence*100:.2f}%")
                         
-                        # --- Thread-based memory update ---
+                        # --- Thread-based memory update ---Updates conversation history with new Q&A.
                         st.session_state.chat_history_by_thread.setdefault(thread_id, [])
                         st.session_state.chat_history_by_thread[thread_id].extend([
                             HumanMessage(content=user_query),
