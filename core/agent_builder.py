@@ -23,21 +23,21 @@ from config.config import load_api_key
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD = 0.3  # when PDF confidence is below this, merge with WebSearch
+CONFIDENCE_THRESHOLD = 0.05  # when PDF confidence is below this, merge with WebSearch
 
 
 def _decision_prompt():
-    # Force STRICT JSON to avoid prose
     return ChatPromptTemplate.from_messages([
         ("system",
-         """You are a routing policy. Return ONLY a single-line JSON object with keys "action" and "input".
-No prose, no markdown, no backticks.
+         """You are a routing policy. Respond ONLY in natural language.
+- You may write in full sentences, paragraphs, bullet points, or numbered lists.
+- Do NOT return JSON, code, or backticks.
+- Keep answers clear and structured for readability.
 
 Actions (choose exactly one):
 - "AnswerQuestionAboutPDFs"  -> for specific questions likely answerable from the PDFs.
 - "SummarizePDF"             -> when the user asks for a summary of a document.
 - "WebSearch"                -> when the question is unrelated to PDFs or PDFs insufficient.
-- "DIRECT"                   -> if you can answer immediately without tools.
 
 Rules:
 - If unsure whether PDFs contain the answer, prefer AnswerQuestionAboutPDFs first.
@@ -47,17 +47,18 @@ Rules:
 Available documents: {available_docs}
 
 User request: {input}
-Return JSON only:
+Respond in the format:
 """)
     ])
 
 
 def _safe_json_parse(s: str):
-    """Robust JSON parse that tolerates stray formatting."""
     s = s.strip()
-    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s.strip(), flags=re.IGNORECASE)
-    if s in {"WebSearch", "AnswerQuestionAboutPDFs", "SummarizePDF", "DIRECT"}:
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE)
+
+    if s in {"WebSearch", "AnswerQuestionAboutPDFs", "SummarizePDF"}:
         return {"action": s, "input": ""}
+
     try:
         return json.loads(s)
     except Exception:
@@ -67,7 +68,17 @@ def _safe_json_parse(s: str):
                 return json.loads(m.group(0))
             except Exception:
                 pass
-    return {"action": "DIRECT", "input": s}
+
+    # --- Heuristic fallback ---
+    lower_s = s.lower()
+
+    # If the LLM is clearly suggesting search or the query is general knowledge
+    if any(word in lower_s for word in ["search", "web", "internet", "weather", "news", "kathmandu"]):
+        return {"action": "WebSearch", "input": s}
+
+    # Otherwise, treat it as a direct model-generated answer
+    return {"action": "DirectAnswer", "input": s}
+
 
 
 def compile_agent(vector_store, raw_documents):
@@ -117,6 +128,8 @@ def compile_agent(vector_store, raw_documents):
 
                 if action in {"AnswerQuestionAboutPDFs", "SummarizePDF", "WebSearch"}:
                     return {"agent_outcome": AgentAction(tool=action, tool_input=tool_input, log=decision_text)}
+                elif action == "DirectAnswer":
+                    return {"agent_outcome": AgentFinish(return_values={"output": tool_input}, log="Direct model answer")}
                 else:
                     return {"agent_outcome": AgentFinish(return_values={"output": tool_input}, log="Direct response")}
             except Exception as e:
@@ -164,7 +177,8 @@ def compile_agent(vector_store, raw_documents):
                 return {"agent_outcome": final, "intermediate_steps": [(agent_outcome, summary)], "confidence": summary_confidence}
 
             elif tool_name == "WebSearch":
-                ws = tool_map["WebSearch"].func(tool_input)
+                original_user_input = state.get("input", "")
+                ws = tool_map["WebSearch"].func(original_user_input)
                 final = AgentFinish(return_values={"output": ws}, log="Used WebSearch")
                 return {"agent_outcome": final, "intermediate_steps": [(agent_outcome, ws)], "confidence": 0.0}
 
